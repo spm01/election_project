@@ -10,5 +10,7 @@ For the first time, I also use a logistic regression to estimate outcomes. This 
 
 Finally, I also estimate an elasticnet logistic regression (!!) but find insignificant differences between the traditional logistic regression and the elasticnet model.
 
+As always, the PDF has the cleanest formatting. :)
+
 Metrics for model performance: accuracy, precision, specificity, and sensitivity.
 
