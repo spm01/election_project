@@ -1,0 +1,137 @@
+#loading packages
+pacman::p_load(skimr, tidyverse, ggplot2, rsample, tidymodels, dials)
+
+#loading data
+elect_data = read.csv('election-2016.csv')
+
+#remove unneeded columns
+elect_data = subset(elect_data, select = -c(county, state))
+
+#data with pop < 5,000,000
+elect_data_small = elect_data |>
+  filter(pop < 5000000)
+
+#brief look at the data 
+#checking data info
+nrow(elect_data)
+length(elect_data$pop)
+
+#simple graph for anaylsis
+poverty_graph_small <- ggplot(data = elect_data_small, aes(x = pop, y = pop_pct_poverty, color = factor(i_republican_2016))) +
+  geom_point() +
+  labs(x = 'Population', y = "Percentage of Population in Poverty", color = 'Vote Republican') +
+  theme_minimal() +
+  scale_x_continuous() +
+  scale_y_continuous()
+
+poverty_graph_small
+
+#preparing LASSO model
+#5-fold cross validation
+#set seed
+set.seed(1234)
+#5-fold CV on training dataset
+elect_cv = elect_data %>% vfold_cv(v = 5)
+#view CV
+elect_cv %>% tidy()
+
+#first step in the recipe
+recipe_all = recipe(i_republican_2016 ~ ., data = elect_data)
+
+#Smashing the whole thing together
+elect_recipe = recipe_all %>%
+  step_impute_mean(everything() & - fips & - i_republican_2016 & - i_republican_2012) %>% # Impute all except unwanted
+  step_scale(everything() & - fips & - i_republican_2016 & - i_republican_2012) # Standardize all except unwanted
+print(elect_recipe)
+str(elect_recipe)
+
+#define range of lambdas (glmnet wants decreasing range)
+lambdas = 10^seq(from = 5, to = -2, length = 100)
+
+#defining model 
+lasso_est = linear_reg(penalty = tune(), mixture = 1) %>% set_engine('glmnet')
+
+#defining workflow
+lasso_workflow = workflow() |>
+  add_model(lasso_est) |>
+  add_recipe(elect_recipe)
+
+#CV w/range of lambdas
+lasso_cv =
+  lasso_workflow %>%
+  tune_grid(
+    resamples = vfold_cv(elect_data, v = 5),
+    grid = data.frame(penalty = lambdas),
+    metrics = metric_set(rmse)
+  )
+#show best models
+lasso_cv %>% show_best()
+
+#lowest RMSE ~0.205 @ lambda = 0.01
+#fitting final model
+lasso_final = glmnet(
+  x = elect_data %>% dplyr::select(-i_republican_2016, -fips) %>% as.matrix(),
+  y = elect_data$i_republican_2016,
+  standardize = F,
+  alpha = 1, 
+  lambda = 0.01
+)
+
+#creating elasticnet crossvalidation model
+#defining elasticnet model
+elas_est = linear_reg(penalty = tune(), mixture = tune()) |> set_engine('glmnet')
+
+#creating elasticnet workflow
+elas_workflow = workflow() |>
+  add_model(elas_est) |>
+  add_recipe(elect_recipe)
+
+#tuning an elasticnet model
+#creating tuning range
+tuning_grid = grid_regular(penalty(), mixture(), levels = 50)
+
+#running 5Fold CV with tuning range
+elas_cv = 
+  elas_workflow |>
+  tune_grid(
+    resamples = elect_cv,
+    grid = tuning_grid,
+    metrics = metric_set(rmse)
+  )
+elas_cv |> show_best()
+
+#change data type for log regression
+elect_data$i_republican_2016 = as.factor(elect_data$i_republican_2016)
+
+# Model definition (using logistic_reg())
+log_est = logistic_reg() %>% set_engine('glm')  # Logistic regression engine
+
+# Workflow creation
+log_workflow = workflow() %>%  # Create an empty workflow
+  add_model(log_est) %>%  # Add the defined model (log_est)
+  add_recipe(elect_recipe)  # Add the pre-defined recipe (elect_recipe)
+
+#creating metrics
+metrics = metric_set(yardstick::accuracy, yardstick::precision, yardstick::specificity, yardstick::sensitivity, roc_auc)
+
+# Fit model with 5-fold cross-validation and record metrics
+log_cv <- log_workflow %>%
+  fit_resamples(
+    resamples = vfold_cv(elect_data, v = 5),
+    metrics = metrics
+  )
+log_cv$.metrics
+log_cv |> show_best()
+
+#creating a logistic lasso regression
+log_lasso = log_workflow |>
+  fit_resamples(
+    resamples = vfold_cv(elect_data, v = 5),
+    metrics = metrics,
+    grid = data.frame(penalty = lambdas),
+  )
+log_lasso$.metrics
+log_lasso |> show_best()
+
+
+
